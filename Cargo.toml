@@ -1,0 +1,23 @@
+[package]
+name = 'byte-derive'
+version = '0.1.0'
+edition = '2024'
+description = 'TryRead and TryWrite derive macros for the bytes crate'
+readme = "README.md"
+repository = "https://github.com/raytraxx/byte-derive"
+license = "MIT"
+keywords = ["bytes"]
+categories = ["no-std::no-alloc"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+itertools = "0.15.0"
+syn = { version = "3.0.3", features = ["full"] }
+quote = "1.0.45"
+proc-macro2 = "1.0.106"
+
+[dev-dependencies]
+byte = "0.2.7"
+heapless = "0.9.3"
