@@ -249,4 +249,38 @@ mod tests {
 
         test_write_and_read(t, &[14, 1, 2, 3], Endian::Little);
     }
+
+    #[test]
+    fn test_ignore() {
+        #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
+        pub struct Test {
+            pub a: u8,
+            #[byte(ignore = true)]
+            pub b: u8,
+            pub c: u8
+        }
+
+        let t = Test {
+            a: 1,
+            b: 2,
+            c: 3,
+        };
+
+        test_try_write(t, &[1, 3], Endian::Little);
+        test_try_read(&[1, 3], Test { a: 1, b: 0, c: 3 }, Endian::Little);
+    }
+
+    #[test]
+    fn test_no_tag() {
+        #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
+        #[byte(no_tag = true)]
+        #[repr(u16)]
+        pub enum Test {
+            A(u8) = 1,
+            B(u8) = 2,
+            C(u8) = 3,
+        }
+
+        test_try_write(Test::B(123), &[123], Endian::Little);
+    }
 }

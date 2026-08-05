@@ -1,3 +1,5 @@
+mod utils;
+
 extern crate core;
 
 use itertools::Itertools;
@@ -10,6 +12,7 @@ use syn::{
     AngleBracketedGenericArguments, Attribute, Meta, PathArguments, Type, Visibility,
     parse_macro_input,
 };
+use crate::utils::bool_expr;
 
 #[proc_macro_derive(TryRead, attributes(byte))]
 pub fn try_read_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -72,6 +75,7 @@ struct EnumDef {
     pub repr_ty: syn::Type,
     pub generics: syn::Generics,
     pub variants: Vec<EnumVariant>,
+    pub no_tag: bool,
 }
 
 impl Parse for EnumDef {
@@ -98,8 +102,6 @@ impl Parse for EnumDef {
             .map(|var| {
                 let ident = var.ident.clone();
                 let discriminant = var.discriminant.clone().unwrap().1;
-
-                
 
                 match &var.fields {
                     syn::Fields::Named(named) => {
@@ -148,6 +150,7 @@ impl Parse for EnumDef {
             .find(|attr| attr.meta.path().is_ident("byte"));
 
         let mut ctx = None;
+        let mut no_tag = false;
         if let Some(attr) = attr
             && let syn::Meta::List(ref meta_list) = attr.meta {
                 let parser = Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
@@ -156,6 +159,7 @@ impl Parse for EnumDef {
                 for arg in args {
                     match get_path_name(&arg.path).as_str() {
                         "ctx" => ctx = Some(arg.value),
+                        "no_tag" => no_tag = bool_expr(&arg.value)?,
                         _ => {
                             return Err(syn::Error::new_spanned(arg, "invalid attribute"));
                         }
@@ -169,6 +173,7 @@ impl Parse for EnumDef {
             repr_ty,
             generics: enm.generics,
             variants,
+            no_tag,
         })
     }
 }
@@ -234,7 +239,7 @@ impl EnumDef {
 
         let mut inner = proc_macro2::TokenStream::new();
         for variant in &self.variants {
-            variant.try_write_to_tokens(&mut inner, &self.repr_ty);
+            variant.try_write_to_tokens(&mut inner, &self.repr_ty, self.no_tag);
         }
 
         let ctx = if let Some(ctx) = self.ctx.as_ref() {
@@ -342,17 +347,25 @@ impl EnumVariant {
         });
     }
 
-    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream, repr_ty: &syn::Type) {
+    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream, repr_ty: &syn::Type, no_tag: bool) {
         let try_write_block = self.make_try_write_block();
         let ctor = self.make_ctor();
         let discriminant = &self.discriminant;
 
-        tokens.extend(quote! {
-            #ctor => {
-                bytes.write_with(offset, #discriminant as #repr_ty, byte::LE)?;
-                #try_write_block
-            }
-        })
+        if no_tag {
+            tokens.extend(quote! {
+                #ctor => {
+                    #try_write_block
+                }
+            });
+        } else {
+            tokens.extend(quote! {
+                #ctor => {
+                    bytes.write_with(offset, #discriminant as #repr_ty, byte::LE)?;
+                    #try_write_block
+                }
+            });
+        }
     }
 }
 
@@ -568,6 +581,11 @@ impl Field {
 
     fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let ident = self.get_ident();
+        if self.config.ignore {
+            tokens.extend(quote!(let #ident = Default::default();));
+            return;
+        }
+
         let ctx = self.config.get_ctx(&self.ty);
 
         let qt = match &self.ty {
@@ -749,6 +767,10 @@ impl Field {
     }
 
     fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream, self_ref: bool) {
+        if self.config.ignore {
+            return;
+        }
+
         let slf = if self_ref {
             self.get_self_call()
         } else {
@@ -870,6 +892,7 @@ struct FieldConfig {
     ctx_write: Option<syn::Expr>,
     parse_if: Option<syn::Expr>,
     len: Option<syn::Expr>,
+    ignore: bool,
 }
 
 impl FieldConfig {
@@ -906,6 +929,7 @@ impl FieldConfig {
             ctx_write: None,
             parse_if: None,
             len: None,
+            ignore: false,
         };
 
         for attr in attrs {
@@ -919,6 +943,7 @@ impl FieldConfig {
                         "ctx_write" => slf.ctx_write = Some(arg.value),
                         "parse_if" => slf.parse_if = Some(arg.value),
                         "len" => slf.len = Some(arg.value),
+                        "ignore" => slf.ignore = bool_expr(&arg.value)?,
                         _ => {
                             return Err(syn::Error::new_spanned(arg, "invalid attribute"));
                         }
