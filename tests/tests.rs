@@ -203,6 +203,29 @@ mod tests {
     }
 
     #[test]
+    fn test_vec_no_primitive() {
+        #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
+        pub struct Inner {
+            pub a: u8,
+        }
+
+        #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
+        struct Test {
+            #[byte(len = u8)]
+            pub v: heapless::Vec<Inner, 32>,
+            pub a: u8,
+        }
+
+        let mut vec = heapless::Vec::<Inner, 32>::new();
+        vec.push(Inner { a: 12 }).unwrap();
+        vec.push(Inner { a: 24 }).unwrap();
+
+        let t = Test { v: vec, a: 36 };
+
+        test_write_and_read(t, &[2, 12, 24, 36], byte::LE);
+    }
+
+    #[test]
     fn test_enum_vec() {
         #[derive(Debug, Clone, PartialEq, TryRead, TryWrite)]
         #[repr(u8)]

@@ -2,19 +2,20 @@ mod utils;
 
 extern crate core;
 
+use proc_macro2::{Span, TokenStream};
 use itertools::Itertools;
 use quote::{ToTokens, quote};
 use std::iter::zip;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{AngleBracketedGenericArguments, Attribute, Meta, PathArguments, Type, Visibility, parse_macro_input};
-use crate::utils::bool_expr;
+use syn::{parse_macro_input, AngleBracketedGenericArguments, Attribute, Meta, PathArguments, Type, TypePath, Visibility, GenericArgument};
+use crate::utils::{bool_expr, is_primitive};
 
 #[proc_macro_derive(TryRead, attributes(byte))]
 pub fn try_read_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as ObjectDef);
-    let mut stream = proc_macro2::TokenStream::new();
+    let mut stream = TokenStream::new();
     ast.try_read_to_tokens(&mut stream);
     stream.into()
 }
@@ -22,7 +23,7 @@ pub fn try_read_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
 #[proc_macro_derive(TryWrite, attributes(byte))]
 pub fn try_write_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as ObjectDef);
-    let mut stream = proc_macro2::TokenStream::new();
+    let mut stream = TokenStream::new();
     ast.try_write_to_tokens(&mut stream);
     stream.into()
 }
@@ -51,14 +52,14 @@ impl Parse for ObjectDef {
 }
 
 impl ObjectDef {
-    fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_read_to_tokens(&self, tokens: &mut TokenStream) {
         match self {
             ObjectDef::Struct(strct) => strct.try_read_to_tokens(tokens),
             ObjectDef::Enum(enm) => enm.try_read_to_tokens(tokens),
         }
     }
 
-    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_write_to_tokens(&self, tokens: &mut TokenStream) {
         match self {
             ObjectDef::Struct(strct) => strct.try_write_to_tokens(tokens),
             ObjectDef::Enum(enm) => enm.try_write_to_tokens(tokens),
@@ -176,12 +177,12 @@ impl Parse for EnumDef {
 }
 
 impl EnumDef {
-    fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_read_to_tokens(&self, tokens: &mut TokenStream) {
         let generics = &self.generics.params;
         let ident = &self.ident;
         let repr_ty = &self.repr_ty;
 
-        let mut inner = proc_macro2::TokenStream::new();
+        let mut inner = TokenStream::new();
         for variant in &self.variants {
             variant.try_read_to_tokens(&mut inner);
         }
@@ -229,12 +230,12 @@ impl EnumDef {
         });
     }
 
-    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_write_to_tokens(&self, tokens: &mut TokenStream) {
         let generics = &self.generics.params;
         let ident = &self.ident;
         let _repr_ty = &self.repr_ty;
 
-        let mut inner = proc_macro2::TokenStream::new();
+        let mut inner = TokenStream::new();
         for variant in &self.variants {
             variant.try_write_to_tokens(&mut inner, &self.repr_ty, self.no_tag);
         }
@@ -269,7 +270,7 @@ struct EnumVariant {
 }
 
 impl EnumVariant {
-    fn make_ctor(&self) -> proc_macro2::TokenStream {
+    fn make_ctor(&self) -> TokenStream {
         let ident = &self.ident;
 
         match &self.fields {
@@ -292,10 +293,10 @@ impl EnumVariant {
         }
     }
 
-    fn make_try_read_block(&self) -> proc_macro2::TokenStream {
+    fn make_try_read_block(&self) -> TokenStream {
         match &self.fields {
             Some(fields) => {
-                let mut block = proc_macro2::TokenStream::new();
+                let mut block = TokenStream::new();
 
                 for field in fields.get_fields() {
                     field.try_read_to_tokens(&mut block);
@@ -311,10 +312,10 @@ impl EnumVariant {
         }
     }
 
-    fn make_try_write_block(&self) -> proc_macro2::TokenStream {
+    fn make_try_write_block(&self) -> TokenStream {
         match &self.fields {
             Some(Fields::Unnamed(fields)) => {
-                let mut block = proc_macro2::TokenStream::new();
+                let mut block = TokenStream::new();
 
                 for field in fields.iter() {
                     field.try_write_to_tokens(&mut block, false);
@@ -323,7 +324,7 @@ impl EnumVariant {
                 quote!(#block)
             }
             Some(Fields::Named(fields)) => {
-                let mut block = proc_macro2::TokenStream::new();
+                let mut block = TokenStream::new();
 
                 for field in fields.iter() {
                     field.try_write_to_tokens(&mut block, false);
@@ -335,7 +336,7 @@ impl EnumVariant {
         }
     }
 
-    fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_read_to_tokens(&self, tokens: &mut TokenStream) {
         let discriminant = &self.discriminant;
         let try_read_block = self.make_try_read_block();
 
@@ -344,7 +345,7 @@ impl EnumVariant {
         });
     }
 
-    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream, repr_ty: &syn::Type, no_tag: bool) {
+    fn try_write_to_tokens(&self, tokens: &mut TokenStream, repr_ty: &syn::Type, no_tag: bool) {
         let try_write_block = self.make_try_write_block();
         let ctor = self.make_ctor();
         let discriminant = &self.discriminant;
@@ -425,17 +426,17 @@ impl Parse for StructDef {
 }
 
 impl StructDef {
-    fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_read_to_tokens(&self, tokens: &mut TokenStream) {
         let generics = &self.generics.params;
         let ident = &self.ident;
 
-        let mut try_read_parse = proc_macro2::TokenStream::new();
-        let mut self_obj = proc_macro2::TokenStream::new();
+        let mut try_read_parse = TokenStream::new();
+        let mut self_obj = TokenStream::new();
 
         match &self.fields {
             None => self_obj.extend(quote! { Self }),
             Some(fields) => {
-                let mut self_fields = proc_macro2::TokenStream::new();
+                let mut self_fields = TokenStream::new();
 
                 for field in fields.get_fields() {
                     let ident = &field.get_ident();
@@ -478,11 +479,11 @@ impl StructDef {
         });
     }
 
-    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_write_to_tokens(&self, tokens: &mut TokenStream) {
         let generics = &self.generics.params;
         let ident = &self.ident;
 
-        let mut try_write_parse = proc_macro2::TokenStream::new();
+        let mut try_write_parse = TokenStream::new();
         match &self.fields {
             None => {}
             Some(fields) => {
@@ -499,7 +500,7 @@ impl StructDef {
         };
 
         tokens.extend(quote! {
-            impl<#generics> ::byte::TryWrite<#ctx> for #ident<#generics> {
+            impl<#generics> ::byte::TryWrite<#ctx> for & #ident<#generics> {
                 fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
                     use ::byte::BytesExt;
 
@@ -507,6 +508,12 @@ impl StructDef {
                     #try_write_parse
 
                     Ok(*offset)
+                }
+            }
+
+            impl<#generics> ::byte::TryWrite<#ctx> for #ident<#generics> {
+                fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
+                    (&self).try_write(bytes, ctx)
                 }
             }
         });
@@ -555,18 +562,18 @@ impl Field {
         }
     }
 
-    fn get_ident(&self) -> proc_macro2::TokenStream {
+    fn get_ident(&self) -> TokenStream {
         match self.field_def {
             FieldDef::Named(ref ident) => quote!(#ident),
             FieldDef::Unnamed(idx) => {
                 let ident =
-                    syn::Ident::new(&format!("field_{}", idx), proc_macro2::Span::call_site());
+                    syn::Ident::new(&format!("field_{}", idx), Span::call_site());
                 quote!(#ident)
             }
         }
     }
 
-    fn get_self_call(&self) -> proc_macro2::TokenStream {
+    fn get_self_call(&self) -> TokenStream {
         match self.field_def {
             FieldDef::Named(ref ident) => quote!(self.#ident),
             FieldDef::Unnamed(idx) => {
@@ -576,7 +583,7 @@ impl Field {
         }
     }
 
-    fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+    fn try_read_to_tokens(&self, tokens: &mut TokenStream) {
         let ident = self.get_ident();
         if self.config.ignore {
             match self.config.default {
@@ -644,7 +651,7 @@ impl Field {
                 panic!("trait_object")
             }
             Type::Tuple(ty) => {
-                let mut stream = proc_macro2::TokenStream::new();
+                let mut stream = TokenStream::new();
                 for inner_ty in ty.elems.iter() {
                     stream.extend(quote!(bytes.read_with::<#inner_ty>(offset, #ctx)?,));
                 }
@@ -663,8 +670,8 @@ impl Field {
         tokens.extend(qt);
     }
 
-    fn read_option(&self, path: &syn::Path) -> proc_macro2::TokenStream {
-        let mut inner_ty = proc_macro2::TokenStream::new();
+    fn read_option(&self, path: &syn::Path) -> TokenStream {
+        let mut inner_ty = TokenStream::new();
         type_generics_to_tokens(path, &mut inner_ty);
 
         let ident = self.get_ident();
@@ -691,7 +698,7 @@ impl Field {
         }
     }
 
-    fn read_vec(&self, path: &syn::Path) -> proc_macro2::TokenStream {
+    fn read_vec(&self, path: &syn::Path) -> TokenStream {
         let ident = self.get_ident();
         let ctx = self.config.get_ctx(&self.ty);
         let len = self.config.get_len();
@@ -712,7 +719,7 @@ impl Field {
             }
         };
 
-        let mut vec_type = proc_macro2::TokenStream::new();
+        let mut vec_type = TokenStream::new();
         let mut is_first = true;
         for segment in path.segments.iter() {
             if !is_first {
@@ -777,7 +784,17 @@ impl Field {
         }
     }
 
-    fn try_write_to_tokens(&self, tokens: &mut proc_macro2::TokenStream, self_ref: bool) {
+    fn write_field(&self, field: &TokenStream, ctx: &TokenStream) -> TokenStream {
+        if is_primitive(&self.ty) {
+            quote! { bytes.write_with(offset, #field, #ctx)?; }
+        } else {
+            quote! { bytes.write_with(offset, &#field, #ctx)?; }
+        }
+    }
+
+
+
+    fn try_write_to_tokens(&self, tokens: &mut TokenStream, self_ref: bool) {
         if self.config.ignore {
             return;
         }
@@ -792,92 +809,79 @@ impl Field {
         let qt = match &self.ty {
             Type::Array(ty) => {
                 let len = ty.len.to_token_stream();
+                let write_field = if is_primitive(&*ty.elem) {
+                    quote! { bytes.write_with(offset, #slf[i], #ctx)?; }
+                } else {
+                    quote! { bytes.write_with(offset, &#slf[i], #ctx)?; }
+                };
+
                 quote! {
                     for i in 0..#len {
-                        bytes.write_with(offset, #slf[i], #ctx)?;
+                        #write_field
                     }
                 }
-            }
-            Type::FnPtr(_ty) => {
-                panic!("fnptr")
-            }
-            Type::Group(_ty) => {
-                panic!("group")
-            }
-            Type::ImplTrait(_ty) => {
-                panic!("impl")
-            }
-            Type::Infer(_ty) => {
-                panic!("infer")
-            }
-            Type::Macro(_ty) => {
-                panic!("macro")
-            }
-            Type::Never(_ty) => {
-                panic!("never")
-            }
-            Type::Paren(_ty) => {
-                panic!("paren")
             }
             Type::Path(ty) => {
                 if path_ends_with(&ty.path, "Option") {
-                    self.write_option(&slf)
+                    self.write_option(&ty, &slf)
                 } else if path_ends_with(&ty.path, "Vec") {
-                    self.write_vec(&slf)
+                    self.write_vec(&ty, &slf)
                 } else {
-                    quote! {
-                        bytes.write_with(offset, #slf, #ctx)?;
-                    }
+                    self.write_field(&slf, &ctx)
                 }
-            }
-            Type::Ptr(_ty) => {
-                panic!("ptr")
-            }
-            Type::Reference(_ty) => {
-                panic!("reference")
-            }
-            Type::Slice(_ty) => {
-                panic!("slice")
-            }
-            Type::TraitObject(_ty) => {
-                panic!("trait_object")
             }
             Type::Tuple(ty) => {
                 let len = ty.elems.len();
-                let mut stream = proc_macro2::TokenStream::new();
+                let mut stream = TokenStream::new();
 
                 for i in 0..len {
                     let idx = syn::Index::from(i);
-                    stream.extend(quote! {
-                        bytes.write_with(offset, #slf.#idx, #ctx)?;
-                    });
+                    let item_ty = ty.elems[i].clone();
+
+                    if is_primitive(&item_ty) {
+                        stream.extend(quote! { bytes.write_with(offset, #slf.#idx, #ctx)?; } );
+                    } else {
+                        stream.extend(quote! { bytes.write_with(offset, &#slf.#idx, #ctx)?; } );
+                    }
                 }
 
                 quote! {
                     #stream
                 }
             }
-            Type::Verbatim(_ty) => {
-                panic!("verbatim")
-            }
             &_ => panic!("unsupported type"),
         };
         tokens.extend(qt);
     }
 
-    fn write_option(&self, slf: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    fn write_option(&self, ty: &TypePath, slf: &TokenStream) -> TokenStream {
+        let ty = match &ty.path.segments.last().unwrap().arguments {
+            PathArguments::AngleBracketed(generics) => {
+                match generics.args.first().unwrap() {
+                    GenericArgument::Type(ty) => ty,
+                    _ => panic!("unsupported generic type for option")
+                }
+            }
+            _ => unreachable!(),
+        };
         let ctx = self.config.get_ctx(&self.ty);
+
+        let write_expr = if is_primitive(ty) {
+            quote! { bytes.write_with(offset, *value, #ctx)?; }
+        } else {
+            quote! { bytes.write_with(offset, value, #ctx)?; }
+        };
 
         match self.config.parse_if {
             Some(_) => quote! {
-                if let Some(value) = #slf {
-                    bytes.write_with(offset, value, #ctx)?;
+                if let Some(ref value) = #slf {
+                    #write_expr
                 }
             },
             None => quote! {
-                if let Some(value) = #slf {
+                if let Some(ref value) = #slf {
                     bytes.write_with(offset, true, ())?;
-                    bytes.write_with(offset, value, #ctx)?;
+                    #write_expr
                 } else {
                     bytes.write_with(offset, false, ())?;
                 }
@@ -885,11 +889,27 @@ impl Field {
         }
     }
 
-    fn write_vec(&self, slf: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    fn write_vec(&self, ty: &TypePath, slf: &TokenStream) -> TokenStream {
         let ctx = self.config.get_ctx(&self.ty);
         let len = self.config.get_len();
 
-        let mut block = proc_macro2::TokenStream::new();
+        let ty = match &ty.path.segments.last().unwrap().arguments {
+            PathArguments::AngleBracketed(generics) => {
+                match generics.args.first().unwrap() {
+                    GenericArgument::Type(ty) => ty,
+                    _ => panic!("unsupported generic type for option")
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        let write_block = if is_primitive(&ty) {
+            quote!(bytes.write_with(offset, *item, #ctx)?;)
+        } else  {
+            quote!(bytes.write_with(offset, item, #ctx)?;)
+        };
+
+        let mut block = TokenStream::new();
 
         if let Some(expr) = len {
             block.extend(quote! {
@@ -898,8 +918,8 @@ impl Field {
         }
 
         block.extend(quote! {
-            for item in #slf.into_iter() {
-                bytes.write_with(offset, item, #ctx)?;
+            for item in #slf.iter() {
+                #write_block
             }
         });
 
@@ -918,7 +938,7 @@ struct FieldConfig {
 }
 
 impl FieldConfig {
-    fn get_ctx(&self, ty: &syn::Type) -> proc_macro2::TokenStream {
+    fn get_ctx(&self, ty: &syn::Type) -> TokenStream {
         match &self.ctx {
             Some(ctx) => quote!(#ctx),
             None => {
@@ -932,7 +952,7 @@ impl FieldConfig {
         }
     }
 
-    fn get_len(&self) -> Option<proc_macro2::TokenStream> {
+    fn get_len(&self) -> Option<TokenStream> {
         self.len.as_ref().map(|expr| quote!(#expr))
     }
 }
@@ -993,7 +1013,7 @@ fn path_ends_with(path: &syn::Path, ident_str: &'static str) -> bool {
     true
 }
 
-fn type_generics_to_tokens(path: &syn::Path, tokens: &mut proc_macro2::TokenStream) {
+fn type_generics_to_tokens(path: &syn::Path, tokens: &mut TokenStream) {
     let segment = path.segments.last().unwrap();
     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
         let args = &args.args;
