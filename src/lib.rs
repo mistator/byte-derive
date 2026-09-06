@@ -8,10 +8,7 @@ use std::iter::zip;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{
-    AngleBracketedGenericArguments, Attribute, Meta, PathArguments, Type, Visibility,
-    parse_macro_input,
-};
+use syn::{AngleBracketedGenericArguments, Attribute, Meta, PathArguments, Type, Visibility, parse_macro_input};
 use crate::utils::bool_expr;
 
 #[proc_macro_derive(TryRead, attributes(byte))]
@@ -582,7 +579,10 @@ impl Field {
     fn try_read_to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let ident = self.get_ident();
         if self.config.ignore {
-            tokens.extend(quote!(let #ident = Default::default();));
+            match self.config.default {
+                None => tokens.extend(quote!(let #ident = Default::default();)),
+                Some(ref expr) => tokens.extend(quote!(let #ident = #expr;)),
+            }
             return;
         }
 
@@ -668,15 +668,26 @@ impl Field {
         type_generics_to_tokens(path, &mut inner_ty);
 
         let ident = self.get_ident();
-        let parse_if = self.config.get_parse_if();
         let ctx = self.config.get_ctx(&self.ty);
 
-        quote! {
-            let #ident = if #parse_if {
-                Some(bytes.read_with::<#inner_ty>(offset, #ctx)?)
-            } else {
-                None
-            };
+        match self.config.parse_if {
+            Some(ref expr) => {
+                quote!{
+                    let #ident = if #expr {
+                        Some(bytes.read_with::<#inner_ty>(offset, #ctx)?)
+                    } else {
+                        None
+                    };
+                }
+            }
+            None => quote!{
+                let is_some = bytes.read_with::<bool>(offset, ())?;
+                let #ident = if is_some {
+                    Some(bytes.read_with::<#inner_ty>(offset, #ctx)?)
+                } else {
+                    None
+                };
+            }
         }
     }
 
@@ -857,9 +868,19 @@ impl Field {
     fn write_option(&self, slf: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         let ctx = self.config.get_ctx(&self.ty);
 
-        quote! {
-            if let Some(value) = #slf {
-                bytes.write_with(offset, value, #ctx)?;
+        match self.config.parse_if {
+            Some(_) => quote! {
+                if let Some(value) = #slf {
+                    bytes.write_with(offset, value, #ctx)?;
+                }
+            },
+            None => quote! {
+                if let Some(value) = #slf {
+                    bytes.write_with(offset, true, ())?;
+                    bytes.write_with(offset, value, #ctx)?;
+                } else {
+                    bytes.write_with(offset, false, ())?;
+                }
             }
         }
     }
@@ -886,13 +907,14 @@ impl Field {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct FieldConfig {
     ctx: Option<syn::Expr>,
     ctx_write: Option<syn::Expr>,
     parse_if: Option<syn::Expr>,
     len: Option<syn::Expr>,
     ignore: bool,
+    default: Option<syn::Expr>,
 }
 
 impl FieldConfig {
@@ -910,13 +932,6 @@ impl FieldConfig {
         }
     }
 
-    fn get_parse_if(&self) -> proc_macro2::TokenStream {
-        match &self.parse_if {
-            Some(parse_if) => quote!(#parse_if),
-            None => quote!(true),
-        }
-    }
-
     fn get_len(&self) -> Option<proc_macro2::TokenStream> {
         self.len.as_ref().map(|expr| quote!(#expr))
     }
@@ -924,29 +939,26 @@ impl FieldConfig {
 
 impl FieldConfig {
     fn from_attrs(attrs: &Vec<syn::Attribute>) -> syn::Result<Self> {
-        let mut slf = Self {
-            ctx: None,
-            ctx_write: None,
-            parse_if: None,
-            len: None,
-            ignore: false,
+        let mut slf = Self::default();
+
+        let Some(attr) = attrs.iter().find(|attr| attr.meta.path().is_ident("byte")) else {
+            return Ok(slf)
         };
 
-        for attr in attrs {
-            if let syn::Meta::List(ref meta_list) = attr.meta {
-                let parser = Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
-                let args = meta_list.parse_args_with(parser)?;
+        if let syn::Meta::List(ref meta_list) = attr.meta {
+            let parser = Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
+            let args = meta_list.parse_args_with(parser)?;
 
-                for arg in args {
-                    match get_path_name(&arg.path).as_str() {
-                        "ctx" => slf.ctx = Some(arg.value),
-                        "ctx_write" => slf.ctx_write = Some(arg.value),
-                        "parse_if" => slf.parse_if = Some(arg.value),
-                        "len" => slf.len = Some(arg.value),
-                        "ignore" => slf.ignore = bool_expr(&arg.value)?,
-                        _ => {
-                            return Err(syn::Error::new_spanned(arg, "invalid attribute"));
-                        }
+            for arg in args {
+                match get_path_name(&arg.path).as_str() {
+                    "ctx" => slf.ctx = Some(arg.value),
+                    "ctx_write" => slf.ctx_write = Some(arg.value),
+                    "parse_if" => slf.parse_if = Some(arg.value),
+                    "len" => slf.len = Some(arg.value),
+                    "ignore" => slf.ignore = bool_expr(&arg.value)?,
+                    "default" => slf.default = Some(arg.value),
+                    _ => {
+                        return Err(syn::Error::new_spanned(arg, "invalid attribute"));
                     }
                 }
             }

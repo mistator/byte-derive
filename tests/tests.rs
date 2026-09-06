@@ -270,6 +270,27 @@ mod tests {
         test_try_read(&[1, 3], Test { a: 1, b: 0, c: 3 }, Endian::Little);
     }
 
+
+    #[test]
+    fn test_ignore_default() {
+        #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
+        pub struct Test {
+            pub a: u8,
+            #[byte(ignore = true, default = 42)]
+            pub b: u8,
+            pub c: u8
+        }
+
+        let t = Test {
+            a: 1,
+            b: 2,
+            c: 3,
+        };
+
+        test_try_write(t, &[1, 3], Endian::Little);
+        test_try_read(&[1, 3], Test { a: 1, b: 42, c: 3 }, Endian::Little);
+    }
+
     #[test]
     fn test_no_tag() {
         #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
@@ -282,5 +303,27 @@ mod tests {
         }
 
         test_try_write(Test::B(123), &[123], Endian::Little);
+    }
+
+    #[test]
+    fn test_option_no_parse_if() {
+        #[derive(TryRead, TryWrite, Clone, PartialEq, Debug)]
+        pub struct Test {
+            pub a: u8,
+            pub o: Option<u16>,
+            pub c: u8,
+        }
+
+        test_write_and_read(Test {
+            a: 6,
+            o: None,
+            c: 11,
+        }, &[6, 0, 11], Endian::Little);
+
+        test_write_and_read(Test {
+            a: 6,
+            o: Some(42),
+            c: 11,
+        }, &[6, 0xff, 42, 00, 11], Endian::Little);
     }
 }
