@@ -10,7 +10,7 @@ checksum = "21c7ab3e4ae80853c7f8dcdcd904dfa25c02cc373534b8d165194325a088a7cc"
 
 [[package]]
 name = "byte-derive"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "byte",
  "heapless",

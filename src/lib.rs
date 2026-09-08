@@ -112,6 +112,7 @@ impl Parse for EnumDef {
                         ));
 
                         EnumVariant {
+                            enum_ident: enm.ident.clone(),
                             ident,
                             fields,
                             discriminant,
@@ -128,12 +129,14 @@ impl Parse for EnumDef {
                         ));
 
                         EnumVariant {
+                            enum_ident: enm.ident.clone(),
                             ident,
                             fields,
                             discriminant,
                         }
                     }
                     syn::Fields::Unit => EnumVariant {
+                        enum_ident: enm.ident.clone(),
                         ident,
                         discriminant,
                         fields: None,
@@ -247,7 +250,7 @@ impl EnumDef {
         };
 
         tokens.extend(quote! {
-            impl<#generics> ::byte::TryWrite<#ctx> for #ident<#generics> {
+            impl<#generics> ::byte::TryWrite<#ctx> for &#ident<#generics> {
                 fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
                     use ::byte::BytesExt;
                     let offset = &mut 0;
@@ -259,11 +262,24 @@ impl EnumDef {
                     Ok(*offset)
                 }
             }
+
+            impl<#generics> ::byte::TryWrite<#ctx> for &mut #ident<#generics> {
+                fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
+                    <&#ident<#generics>>::try_write(self, bytes, ctx)
+                }
+            }
+
+            impl<#generics> ::byte::TryWrite<#ctx> for #ident<#generics> {
+                fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
+                    <&#ident<#generics>>::try_write(&self, bytes, ctx)
+                }
+            }
         });
     }
 }
 
 struct EnumVariant {
+    enum_ident: syn::Ident,
     ident: syn::Ident,
     discriminant: syn::Expr,
     fields: Option<Fields>,
@@ -272,6 +288,7 @@ struct EnumVariant {
 impl EnumVariant {
     fn make_ctor(&self) -> TokenStream {
         let ident = &self.ident;
+        let enum_ident = &self.enum_ident;
 
         match &self.fields {
             Some(fields) => {
@@ -282,13 +299,12 @@ impl EnumVariant {
                     .collect_vec();
 
                 match fields {
-                    Fields::Named(_) => quote!(Self::#ident { #(#idents),* }),
-                    Fields::Unnamed(_) => quote!(Self::#ident ( #(#idents),* )),
+                    Fields::Named(_) => quote!(#enum_ident::#ident { #(#idents),* }),
+                    Fields::Unnamed(_) => quote!(#enum_ident::#ident ( #(#idents),* )),
                 }
             }
             None => {
-                let ident = &self.ident;
-                quote!(Self::#ident)
+                quote!(#enum_ident::#ident)
             }
         }
     }
@@ -318,7 +334,7 @@ impl EnumVariant {
                 let mut block = TokenStream::new();
 
                 for field in fields.iter() {
-                    field.try_write_to_tokens(&mut block, false);
+                    field.try_write_to_tokens(&mut block, false, true, true);
                 }
 
                 quote!(#block)
@@ -327,7 +343,7 @@ impl EnumVariant {
                 let mut block = TokenStream::new();
 
                 for field in fields.iter() {
-                    field.try_write_to_tokens(&mut block, false);
+                    field.try_write_to_tokens(&mut block, false, true, true);
                 }
 
                 quote!(#block)
@@ -488,7 +504,7 @@ impl StructDef {
             None => {}
             Some(fields) => {
                 for field in fields.get_fields() {
-                    field.try_write_to_tokens(&mut try_write_parse, true);
+                    field.try_write_to_tokens(&mut try_write_parse, true, false, false);
                 }
             }
         }
@@ -500,7 +516,7 @@ impl StructDef {
         };
 
         tokens.extend(quote! {
-            impl<#generics> ::byte::TryWrite<#ctx> for & #ident<#generics> {
+            impl<#generics> ::byte::TryWrite<#ctx> for &#ident<#generics> {
                 fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
                     use ::byte::BytesExt;
 
@@ -511,9 +527,15 @@ impl StructDef {
                 }
             }
 
+            impl<#generics> ::byte::TryWrite<#ctx> for &mut #ident<#generics> {
+                fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
+                    <&#ident<#generics>>::try_write(self, bytes, ctx)
+                }
+            }
+
             impl<#generics> ::byte::TryWrite<#ctx> for #ident<#generics> {
                 fn try_write(self, bytes: &mut [u8], ctx: #ctx) -> ::byte::Result<usize> {
-                    (&self).try_write(bytes, ctx)
+                    <&#ident<#generics>>::try_write(&self, bytes, ctx)
                 }
             }
         });
@@ -784,17 +806,23 @@ impl Field {
         }
     }
 
-    fn write_field(&self, field: &TokenStream, ctx: &TokenStream) -> TokenStream {
-        if is_primitive(&self.ty) {
-            quote! { bytes.write_with(offset, #field, #ctx)?; }
+    fn write_field(&self, field: &TokenStream, ctx: &TokenStream, is_enum: bool) -> TokenStream {
+        if is_enum {
+            if is_primitive(&self.ty) {
+                quote! { bytes.write_with(offset, *#field, #ctx)?; }
+            } else {
+                quote! { bytes.write_with(offset, #field, #ctx)?; }
+            }
         } else {
-            quote! { bytes.write_with(offset, &#field, #ctx)?; }
+            if is_primitive(&self.ty) {
+                quote! { bytes.write_with(offset, #field, #ctx)?; }
+            } else {
+                quote! { bytes.write_with(offset, &#field, #ctx)?; }
+            }
         }
     }
 
-
-
-    fn try_write_to_tokens(&self, tokens: &mut TokenStream, self_ref: bool) {
+    fn try_write_to_tokens(&self, tokens: &mut TokenStream, self_ref: bool, is_enum: bool, is_ref: bool) {
         if self.config.ignore {
             return;
         }
@@ -823,11 +851,11 @@ impl Field {
             }
             Type::Path(ty) => {
                 if path_ends_with(&ty.path, "Option") {
-                    self.write_option(&ty, &slf)
+                    self.write_option(&ty, &slf, is_ref)
                 } else if path_ends_with(&ty.path, "Vec") {
                     self.write_vec(&ty, &slf)
                 } else {
-                    self.write_field(&slf, &ctx)
+                    self.write_field(&slf, &ctx, is_enum)
                 }
             }
             Type::Tuple(ty) => {
@@ -854,7 +882,7 @@ impl Field {
         tokens.extend(qt);
     }
 
-    fn write_option(&self, ty: &TypePath, slf: &TokenStream) -> TokenStream {
+    fn write_option(&self, ty: &TypePath, slf: &TokenStream, is_ref: bool) -> TokenStream {
         let ty = match &ty.path.segments.last().unwrap().arguments {
             PathArguments::AngleBracketed(generics) => {
                 match generics.args.first().unwrap() {
@@ -871,15 +899,20 @@ impl Field {
         } else {
             quote! { bytes.write_with(offset, value, #ctx)?; }
         };
+        let borrow = if is_ref {
+            quote!(value)
+        } else {
+            quote!(ref value)
+        };
 
         match self.config.parse_if {
             Some(_) => quote! {
-                if let Some(ref value) = #slf {
+                if let Some(#borrow) = #slf {
                     #write_expr
                 }
             },
             None => quote! {
-                if let Some(ref value) = #slf {
+                if let Some(#borrow) = #slf {
                     bytes.write_with(offset, true, ())?;
                     #write_expr
                 } else {
